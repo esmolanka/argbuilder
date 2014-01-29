@@ -11,6 +11,7 @@ import Control.Monad.Error
 
 import Data.Default
 import Data.List
+import Data.Char
 
 newtype ArgBuilderM env s w a = ArgBuilderM
     { unArgBuilderM :: ReaderT env (StateT s (WriterT w (Either String))) a }
@@ -20,24 +21,44 @@ runArgBuilderM :: env -> s -> ArgBuilderM env s [w] a -> (Either String ((a, s),
 runArgBuilderM env state m = runWriterT . flip runStateT state . flip runReaderT env $ unArgBuilderM m
 
 newtype Arg = Arg String
-data Token = Argument Arg | Flag String | Optional String (Maybe Arg) | Parameter String Arg
+data FlagType = Sticky
+              | Equals
+              | Separated
+
+joinFlagArg :: FlagType -> String -> String -> [String]
+joinFlagArg Sticky flg arg = [flg ++ arg]
+joinFlagArg Equals flg arg = [flg ++ "=" ++ arg]
+joinFlagArg Separated flg arg = [flg, arg]
+
+data Token = Flag String
+           | Optional FlagType String (Maybe Arg)
+           | Parameter FlagType String Arg
+           | Argument Arg
 
 detokenize = concatMap go
     where go :: Token -> [String]
           go (Argument (Arg a)) = [a]
           go (Flag f) = [f]
-          go (Optional f ma) = f : maybe [] (\(Arg a) -> [a]) ma
-          go (Parameter f (Arg a)) = [f,a]
+          go (Optional ty f ma) = maybe [] (\(Arg a) -> joinFlagArg ty f a) ma
+          go (Parameter ty f (Arg a)) = joinFlagArg ty f a
+
+shellize = intercalate " " . map escape . detokenize
+    where escape s | any (not . isNonEscapable) s = "'" ++ concatMap escSingleQuote s ++ "'"
+                   | otherwise = s
+          escSingleQuote '\'' = "'\\''"
+          escSingleQuote x = x:[]
+          isNonEscapable c = any ($ c) [isAlphaNum, (`elem` "-_+=/:")]
+
 
 type ArgsM env s a = ArgBuilderM env s [Token] a
 
 runArgsM :: (Default s) =>
             env
          -> ArgBuilderM env s [Token] a
-         -> Either String (a, [String])
+         -> Either String (a, [Token])
 runArgsM env m = do
   ((result, _), tokens) <- runArgBuilderM env def m
-  return (result, detokenize tokens)
+  return (result, tokens)
 
 type ValueM env s a = ArgBuilderM env s [Arg] a
 
@@ -54,14 +75,19 @@ flag :: String -> ArgsM env s ()
 flag f = tell [Flag f]
 
 infix 1 =:?
-
-(=:?) :: String -> Maybe String -> ArgsM env s ()
-(=:?) f marg = tell [Optional f (fmap Arg marg)]
-
 infix 1 =::
 
-(=::) :: String -> String -> ArgsM env s ()
-(=::) f arg = tell [Parameter f (Arg arg)]
+class Flag f where
+    (=:?) :: f -> Maybe String -> ArgsM env s ()
+    (=::) :: f -> String -> ArgsM env s ()
+
+instance Flag String where
+    (=:?) f marg = (Separated, f) =:? marg
+    (=::) f arg  = (Separated, f) =:: arg
+
+instance Flag (FlagType, String) where
+    (=:?) (ty, f) marg = tell [Optional ty f (fmap Arg marg)]
+    (=::) (ty, f) arg  = tell [Parameter ty f (Arg arg)]
 
 liftError :: (MonadError e m) => Either e a -> m a
 liftError (Left e) = throwError e
@@ -69,7 +95,7 @@ liftError (Right a) = return a
 
 infix 1 =:@
 
-(=:@) :: String -> ValueM env s a -> ArgsM env s a
+(=:@) :: (Flag flag) => flag -> ValueM env s a -> ArgsM env s a
 (=:@) f argm = do
   env <- ask
   st <- get
@@ -80,12 +106,12 @@ infix 1 =:@
 
 infix 1 =:$
 
-(=:$) :: String -> ArgsM env s a -> ArgsM env s a
+(=:$) :: (Flag flag) => flag -> ArgsM env s a -> ArgsM env s a
 (=:$) f argm = do
   env <- ask
   st <- get
   ((r, _), args) <- liftError $ runArgBuilderM env st argm
-  f =:: (intercalate " " . detokenize $ args)
+  f =:: shellize args
   return r
 
 class PushArg w where
@@ -96,9 +122,3 @@ instance PushArg [Arg] where
 
 instance PushArg [Token] where
     arg s = tell [Argument $ Arg s]
-
-embed :: (MonadState s m, MonadWriter w m, Monoid w) => ((w -> w) -> s -> s) -> m a -> m a
-embed acc m = do
-  (a, tokens) <- censor (const mempty) . listen $ m
-  modify (acc (mappend tokens))
-  return a

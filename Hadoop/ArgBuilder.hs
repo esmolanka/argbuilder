@@ -90,21 +90,29 @@ cmdenv name value = do
   "-cmdenv" =:: name ++ "=" ++ value
 
 runHadoopArgs :: Env -> ArgsM Env HadoopArgState a -> Either String (HadoopArgState, [String])
-runHadoopArgs env m = runArgsM env (m >> get)
+runHadoopArgs env m = right (second detokenize) $ runArgsM env (m >> get)
 
 
 testArgs x = do
   output "s3://somewhere/in/s3"
   mapper "AggregateMap" $ do
-         when x $ flag "-xMPRelativeBuzz"
-         flag "-B4"
+               when x $ flag "-xMPRelativeBuzz"
+               flag "-B4"
 
   reducer "AggregateReduce" $ do
-           flag "-B4"
+               flag "-B4"
+               flag "Hello World"
+
   cacheFile $ do
-    script "AggregateMap.sh"
-    resource $ "directory/some.conf" `alias` "someothername.conf"
+               script "AggregateMap.sh"
+               resource $ "directory/some.conf" `alias` "someothername.conf"
 
   cmdenv "BEGINDATE" "2013-01-01"
 
+  (Sticky, "-W") =:@ do arg "foo"
+                        arg "bar"
+                        arg "baz"
+
 testIt = runHadoopArgs (Env "/bin" "/etc") (testArgs True)
+
+testIt' = right (second shellize) $ runArgsM (Env "/bin" "/etc") (testArgs True)

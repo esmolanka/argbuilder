@@ -1,8 +1,23 @@
 {-# LANGUAGE FlexibleContexts, FlexibleInstances, GeneralizedNewtypeDeriving #-}
-module System.Console.ArgBuilder where
 
-import Control.Applicative
-import Control.Arrow
+module System.Console.ArgBuilder
+    ( Arg (..)
+    , FlagType (..)
+    , Token (..)
+    , detokenize
+    , shellize
+    , ArgBuilderM
+    , runArgBuilderM
+    , ArgsM
+    , runArgsM
+    , ValueM
+    , runValueM
+    , PushArg (..)
+    , (=:@)
+    , (=:$)
+    , Flag (..)
+    )
+    where
 
 import Control.Monad.Reader
 import Control.Monad.State
@@ -13,6 +28,7 @@ import Data.Default
 import Data.List
 import Data.Char
 
+-- | Generalized argument builder monad
 newtype ArgBuilderM env s w a = ArgBuilderM
     { unArgBuilderM :: ReaderT env (StateT s (WriterT w (Either String))) a }
     deriving (Monad, MonadReader env, MonadWriter w, MonadState s, MonadError String)
@@ -20,35 +36,43 @@ newtype ArgBuilderM env s w a = ArgBuilderM
 runArgBuilderM :: env -> s -> ArgBuilderM env s [w] a -> (Either String ((a, s), [w]))
 runArgBuilderM env state m = runWriterT . flip runStateT state . flip runReaderT env $ unArgBuilderM m
 
+-- | Wrapper for raw arguments
 newtype Arg = Arg String
-data FlagType = Sticky
-              | Equals
-              | Separated
 
-joinFlagArg :: FlagType -> String -> String -> [String]
-joinFlagArg Sticky flg arg = [flg ++ arg]
-joinFlagArg Equals flg arg = [flg ++ "=" ++ arg]
-joinFlagArg Separated flg arg = [flg, arg]
+-- | Flag-argument binding type
+data FlagType = Sticky         -- ^ i.e. -Wall
+              | Equals         -- ^ i.e. --count=10
+              | Separated      -- ^ i.e. --file foo.txt
 
+-- | Argument builder token type, contains basic blocks
 data Token = Flag String
            | Optional FlagType String (Maybe Arg)
            | Parameter FlagType String Arg
            | Argument Arg
 
-detokenize = concatMap go
-    where go :: Token -> [String]
-          go (Argument (Arg a)) = [a]
-          go (Flag f) = [f]
-          go (Optional ty f ma) = maybe [] (\(Arg a) -> joinFlagArg ty f a) ma
-          go (Parameter ty f (Arg a)) = joinFlagArg ty f a
+-- | Flatten tokens to a list of strings, which is could be used to run process.
+detokenize = concatMap expandToken
+    where
+      joinFlagArg :: FlagType -> String -> String -> [String]
+      joinFlagArg Sticky flg arg = [flg ++ arg]
+      joinFlagArg Equals flg arg = [flg ++ "=" ++ arg]
+      joinFlagArg Separated flg arg = [flg, arg]
 
+      expandToken :: Token -> [String]
+      expandToken (Argument (Arg a)) = [a]
+      expandToken (Flag f) = [f]
+      expandToken (Optional ty f ma) = maybe [] (\(Arg a) -> joinFlagArg ty f a) ma
+      expandToken (Parameter ty f (Arg a)) = joinFlagArg ty f a
+
+-- | Flatten tokens to a string, which could be used in call "system" or in shell.
+-- Outputs a string which does not allow any shell magic: wildcards, env variables, etc.
 shellize = intercalate " " . map escape . detokenize
-    where escape s | any (not . isNonEscapable) s = "'" ++ concatMap escSingleQuote s ++ "'"
-                   | otherwise = s
-          escSingleQuote '\'' = "'\\''"
-          escSingleQuote x = x:[]
-          isNonEscapable c = any ($ c) [isAlphaNum, (`elem` "-_+=/:")]
-
+    where
+      escape s | any (not . isNonEscapable) s = "'" ++ concatMap escSingleQuote s ++ "'"
+               | otherwise = s
+      escSingleQuote '\'' = "'\\''"
+      escSingleQuote x = x:[]
+      isNonEscapable c = any ($ c) [isAlphaNum, (`elem` "-_+=/:")]
 
 type ArgsM env s a = ArgBuilderM env s [Token] a
 
@@ -68,24 +92,30 @@ runValueM :: env
           -> Either String ((a, s), [Arg])
 runValueM env st m = runArgBuilderM env st m
 
-argument :: String -> ArgsM env s ()
-argument a = tell [ Argument (Arg a) ]
+class PushArg w where
+    arg :: (MonadWriter w m) => String -> m ()
 
-flag :: String -> ArgsM env s ()
-flag f = tell [Flag f]
+instance PushArg [Arg] where
+    arg s = tell [Arg s]
+
+instance PushArg [Token] where
+    arg s = tell [Argument $ Arg s]
 
 infix 1 =:?
 infix 1 =::
 
 class Flag f where
+    flag  :: f -> ArgsM env s ()
     (=:?) :: f -> Maybe String -> ArgsM env s ()
     (=::) :: f -> String -> ArgsM env s ()
 
 instance Flag String where
+    flag f       = tell [ Flag f ]
     (=:?) f marg = (Separated, f) =:? marg
     (=::) f arg  = (Separated, f) =:: arg
 
 instance Flag (FlagType, String) where
+    flag (ty, f)       = tell [ Flag f ]
     (=:?) (ty, f) marg = tell [Optional ty f (fmap Arg marg)]
     (=::) (ty, f) arg  = tell [Parameter ty f (Arg arg)]
 
@@ -113,12 +143,3 @@ infix 1 =:$
   ((r, _), args) <- liftError $ runArgBuilderM env st argm
   f =:: shellize args
   return r
-
-class PushArg w where
-    arg :: (MonadWriter w m) => String -> m ()
-
-instance PushArg [Arg] where
-    arg s = tell [Arg s]
-
-instance PushArg [Token] where
-    arg s = tell [Argument $ Arg s]

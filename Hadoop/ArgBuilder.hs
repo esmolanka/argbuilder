@@ -5,9 +5,7 @@ module Hadoop.ArgBuilder where
 import System.Console.ArgBuilder
 import System.FilePath
 
-import Control.Applicative
 import Control.Arrow
-
 import Control.Monad.Reader
 import Control.Monad.State
 import Control.Monad.Writer
@@ -15,9 +13,6 @@ import Control.Monad.Error
 
 import Data.Char
 import Data.Default
-import Data.List
-import Data.Maybe
-
 
 data Env = Env { envScriptPath :: FilePath
                , envResourcePath :: FilePath

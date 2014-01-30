@@ -16,7 +16,9 @@ data Env = Env { envScriptPath :: FilePath
                , envResourcePath :: FilePath
                }
 
-data HadoopArgState = HadoopArgState { stOutput :: Maybe FilePath } deriving (Show)
+data HadoopArgState = HadoopArgState
+    { stOutput :: Maybe FilePath }
+    deriving (Show)
 
 instance Default HadoopArgState where
     def = HadoopArgState Nothing
@@ -81,6 +83,7 @@ runHadoopArgs :: Env -> ArgsM Env HadoopArgState a -> Either String (HadoopArgSt
 runHadoopArgs env m = right (second detokenize) $ runArgsM env (m >> get)
 
 
+testArgs :: Bool -> ArgBuilderM Env HadoopArgState Argument ()
 testArgs noFooMode = do
   "-D" =:@ do arg ("stream.num.map.output.key.fields",    "4")
               arg ("mapred.text.key.partitioner.options", "-k2,4")

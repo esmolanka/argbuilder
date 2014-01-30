@@ -1,5 +1,3 @@
-{-# LANGUAGE FlexibleContexts #-}
-
 module Hadoop.ArgBuilder where
 
 import System.Console.ArgBuilder
@@ -23,39 +21,34 @@ data HadoopArgState = HadoopArgState { stOutput :: Maybe FilePath } deriving (Sh
 instance Default HadoopArgState where
     def = HadoopArgState Nothing
 
-type HadoopArgM a = ArgsM Env HadoopArgState a
+type HadoopArgM w a = ArgBuilderM Env HadoopArgState w a
 
 alias :: FilePath -> FilePath -> FilePath
 alias f a = let (path, fn) = splitFileName f
             in path </> (fn ++ "#" ++ a)
 
-script :: (MonadReader Env m, MonadWriter w m, PushArg w) =>
-          FilePath
-       -> m ()
+script :: (ArgWrite w) => FilePath -> ArgBuilderM Env s w ()
 script f = do
   path <- asks envScriptPath
   arg (path </> f)
 
-resource :: (MonadReader Env m, MonadWriter w m, PushArg w) =>
-          FilePath
-       -> m ()
+resource :: (ArgWrite w) => FilePath -> ArgBuilderM Env s w ()
 resource f = do
   path <- asks envResourcePath
   arg (path </> f)
 
-
-mapper :: FilePath -> HadoopArgM () -> HadoopArgM ()
+mapper :: FilePath -> HadoopArgM Argument () -> HadoopArgM Argument ()
 mapper f argm = do
   "-mapper" =:$ do script f
                    argm
 
-reducer :: FilePath -> HadoopArgM () -> HadoopArgM ()
+reducer :: FilePath -> HadoopArgM Argument () -> HadoopArgM Argument ()
 reducer f argm = do
   path <- asks envScriptPath
   "-reducer" =:$ do script f
                     argm
 
-inputs :: [FilePath] -> HadoopArgM ()
+inputs :: [FilePath] -> HadoopArgM Argument ()
 inputs paths = "-input" =:@ mapM_ arg paths
 
 output path = do
@@ -107,6 +100,8 @@ testArgs x = do
   (Sticky, "-W") =:@ do arg "foo"
                         arg "bar"
                         arg "baz"
+                        arg (100 :: Int)
+                        arg ["some", "strange", "things"]
 
 testIt = runHadoopArgs (Env "/bin" "/etc") (testArgs True)
 

@@ -1,21 +1,28 @@
-{-# LANGUAGE FlexibleContexts, FlexibleInstances, GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE ViewPatterns, OverlappingInstances, FlexibleContexts
+  , FlexibleInstances, GeneralizedNewtypeDeriving #-}
 
 module System.Console.ArgBuilder
-    ( Arg (..)
-    , FlagType (..)
-    , Token (..)
-    , detokenize
-    , shellize
+    (
+     -- * Types
+     FlagType (..)
+    , Argument (..)
+    , Arg (..)
     , ArgBuilderM
     , runArgBuilderM
     , ArgsM
     , runArgsM
     , ValueM
     , runValueM
-    , PushArg (..)
+    -- * Argument classes
+    , ArgWrite (..)
+    , ArgLike
+    -- * Combinators
+    , Flag (..)
     , (=:@)
     , (=:$)
-    , Flag (..)
+    -- * Converting utils
+    , detokenize
+    , shellize
     )
     where
 
@@ -30,42 +37,49 @@ import Data.Char
 
 -- | Generalized argument builder monad
 newtype ArgBuilderM env s w a = ArgBuilderM
-    { unArgBuilderM :: ReaderT env (StateT s (WriterT w (Either String))) a }
-    deriving (Monad, MonadReader env, MonadWriter w, MonadState s, MonadError String)
+    { unArgBuilderM :: ReaderT env (StateT s (WriterT [w] (Either String))) a }
+    deriving (Monad, MonadReader env, MonadWriter [w], MonadState s, MonadError String)
 
-runArgBuilderM :: env -> s -> ArgBuilderM env s [w] a -> (Either String ((a, s), [w]))
+-- | Runs building of arguments
+runArgBuilderM :: env
+               -> s
+               -> ArgBuilderM env s w a
+               -> (Either String ((a, s), [w]))
 runArgBuilderM env state m = runWriterT . flip runStateT state . flip runReaderT env $ unArgBuilderM m
 
 -- | Wrapper for raw arguments
-newtype Arg = Arg String
+newtype Arg = Arg { unArg :: String } deriving (Eq, Show)
 
 -- | Flag-argument binding type
 data FlagType = Sticky         -- ^ i.e. -Wall
               | Equals         -- ^ i.e. --count=10
               | Separated      -- ^ i.e. --file foo.txt
+                deriving (Eq, Show)
 
--- | Argument builder token type, contains basic blocks
-data Token = Flag String
-           | Optional FlagType String (Maybe Arg)
-           | Parameter FlagType String Arg
-           | Argument Arg
+-- | Argument builder token type
+data Argument = Argument Arg
+              | Flag String
+              | Optional FlagType String (Maybe Arg)
+              | Parameter FlagType String Arg
+                deriving (Eq, Show)
 
--- | Flatten tokens to a list of strings, which is could be used to run process.
-detokenize = concatMap expandToken
+-- | Flatten tokens to a list of arguments, which could be passed to 'System.Process.runProcess'.
+detokenize = concatMap expandArgument
     where
       joinFlagArg :: FlagType -> String -> String -> [String]
       joinFlagArg Sticky flg arg = [flg ++ arg]
       joinFlagArg Equals flg arg = [flg ++ "=" ++ arg]
       joinFlagArg Separated flg arg = [flg, arg]
 
-      expandToken :: Token -> [String]
-      expandToken (Argument (Arg a)) = [a]
-      expandToken (Flag f) = [f]
-      expandToken (Optional ty f ma) = maybe [] (\(Arg a) -> joinFlagArg ty f a) ma
-      expandToken (Parameter ty f (Arg a)) = joinFlagArg ty f a
+      expandArgument :: Argument -> [String]
+      expandArgument (Argument (Arg a)) = [a]
+      expandArgument (Flag f) = [f]
+      expandArgument (Optional ty f ma) = maybe [] (\(Arg a) -> joinFlagArg ty f a) ma
+      expandArgument (Parameter ty f (Arg a)) = joinFlagArg ty f a
 
--- | Flatten tokens to a string, which could be used in call "system" or in shell.
--- Outputs a string which does not allow any shell magic: wildcards, env variables, etc.
+-- | Flatten tokens to a string, which could be passed to
+-- 'System.Process.system' or used in shell. Output string is escaped,
+-- so no iterpolation is being made.
 shellize = intercalate " " . map escape . detokenize
     where
       escape s | any (not . isNonEscapable) s = "'" ++ concatMap escSingleQuote s ++ "'"
@@ -74,39 +88,77 @@ shellize = intercalate " " . map escape . detokenize
       escSingleQuote x = x:[]
       isNonEscapable c = any ($ c) [isAlphaNum, (`elem` "-_+=/:")]
 
-type ArgsM env s a = ArgBuilderM env s [Token] a
+-- | Shortcut type for argmument builder monad (high-level).
+type ArgsM env s a = ArgBuilderM env s Argument a
 
 runArgsM :: (Default s) =>
             env
-         -> ArgBuilderM env s [Token] a
-         -> Either String (a, [Token])
+         -> ArgBuilderM env s Argument a
+         -> Either String (a, [Argument])
 runArgsM env m = do
   ((result, _), tokens) <- runArgBuilderM env def m
   return (result, tokens)
 
-type ValueM env s a = ArgBuilderM env s [Arg] a
+
+-- | Shortcut to a monad which provides value binding for '=:@' combinator.
+type ValueM env s a = ArgBuilderM env s Arg a
 
 runValueM :: env
           -> s
-          -> ArgBuilderM env s [Arg] a
+          -> ArgBuilderM env s Arg a
           -> Either String ((a, s), [Arg])
 runValueM env st m = runArgBuilderM env st m
 
-class PushArg w where
-    arg :: (MonadWriter w m) => String -> m ()
 
-instance PushArg [Arg] where
-    arg s = tell [Arg s]
+-- | Helper class which allows to use 'arg' in both 'ArgsM' and 'ValueM' monads.
+class ArgWrite w where
+    arg :: (ArgLike a) => a -> ArgBuilderM e s w ()
 
-instance PushArg [Token] where
-    arg s = tell [Argument $ Arg s]
+instance ArgWrite Arg where
+    arg a = tell [ printArg a ]
+
+instance ArgWrite Argument where
+    arg a = tell [ Argument $ printArg a ]
+
+
+-- | Class of types which can be printed as a command line argument.
+class ArgLike a where
+    printArg :: a -> Arg
+
+instance ArgLike String where
+    printArg = Arg
+
+instance ArgLike Int where
+    printArg = Arg . show
+
+instance ArgLike Integer where
+    printArg = Arg . show
+
+instance (ArgLike a, ArgLike b) => ArgLike (a, b) where
+    printArg ( printArg -> Arg a
+             , printArg -> Arg b
+             ) = Arg $ a ++ "," ++ b
+
+instance (ArgLike a, ArgLike b, ArgLike c) => ArgLike (a, b, c) where
+    printArg ( printArg -> Arg a
+             , printArg -> Arg b
+             , printArg -> Arg c
+             ) = Arg $ intercalate "," [a,b,c]
+
+instance (ArgLike a) => ArgLike [a] where
+    printArg as = Arg $ intercalate "," . map (unArg . printArg) $ as
 
 infix 1 =:?
 infix 1 =::
 
+-- | Class of types which could be used as a flag. It is basically
+-- strings or strings with annotation.
 class Flag f where
+    -- | Push a flag.
     flag  :: f -> ArgsM env s ()
+    -- | Push an option with optional value. If value is missing, only the flag will be pushed.
     (=:?) :: f -> Maybe String -> ArgsM env s ()
+    -- | Push an option with required value.
     (=::) :: f -> String -> ArgsM env s ()
 
 instance Flag String where
@@ -116,8 +168,8 @@ instance Flag String where
 
 instance Flag (FlagType, String) where
     flag (ty, f)       = tell [ Flag f ]
-    (=:?) (ty, f) marg = tell [Optional ty f (fmap Arg marg)]
-    (=::) (ty, f) arg  = tell [Parameter ty f (Arg arg)]
+    (=:?) (ty, f) marg = tell [ Optional ty f (fmap Arg marg) ]
+    (=::) (ty, f) arg  = tell [ Parameter ty f (Arg arg) ]
 
 liftError :: (MonadError e m) => Either e a -> m a
 liftError (Left e) = throwError e
@@ -125,6 +177,14 @@ liftError (Right a) = return a
 
 infix 1 =:@
 
+-- | For each argument from value monad outputs a flag preceding that
+-- argument.
+--
+-- For example:
+-- > (Sticky, "-W") =:@ arg "all" >> arg "error"
+-- gives us:
+-- > -Wall -Werror
+--
 (=:@) :: (Flag flag) => flag -> ValueM env s a -> ArgsM env s a
 (=:@) f argm = do
   env <- ask
@@ -136,6 +196,16 @@ infix 1 =:@
 
 infix 1 =:$
 
+-- | Embeds arguments and outputs this string escaped and with a flag
+-- preceding it.
+--
+-- For example:
+-- > (Equals, "--c-opts") =:$ do
+-- >   flag "-O2"
+-- >   "-march" =:: "i486"
+-- gives us:
+-- > --c-opts="-O2 -march i486"
+--
 (=:$) :: (Flag flag) => flag -> ArgsM env s a -> ArgsM env s a
 (=:$) f argm = do
   env <- ask

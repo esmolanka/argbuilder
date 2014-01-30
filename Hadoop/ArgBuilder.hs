@@ -81,28 +81,35 @@ runHadoopArgs :: Env -> ArgsM Env HadoopArgState a -> Either String (HadoopArgSt
 runHadoopArgs env m = right (second detokenize) $ runArgsM env (m >> get)
 
 
-testArgs x = do
-  output "s3://somewhere/in/s3"
-  mapper "AggregateMap" $ do
-               when x $ flag "-xMPRelativeBuzz"
-               flag "-B4"
+testArgs noFooMode = do
+  "-D" =:@ do arg ("stream.num.map.output.key.fields",    "4")
+              arg ("mapred.text.key.partitioner.options", "-k2,4")
+              arg ("stream.num.reduce.output.key.fields", "5")
 
-  reducer "AggregateReduce" $ do
-               flag "-B4"
-               flag "Hello World"
+  inputs ["s3://path/to/input"]
+  output "s3://path/to/output"
+
+  mapper "Map" $ do
+    when noFooMode $ flag "--no-foo"
+    (Equals, "--dictionary") =:: "file.txt"
+
+  reducer "ReducerUsesFooBarBinary.sh" $ do
+    flag "--enable-foo"
+    (Sticky, "-a") =:@ do arg "Date"
+                          arg "Time"
+                          arg "Asset"
 
   cacheFile $ do
-               script "AggregateMap.sh"
-               resource $ "directory/some.conf" `alias` "someothername.conf"
+    script "FooBar"
+    resource $ "directory/some-file.txt" `alias` "file.txt"
 
   cmdenv "BEGINDATE" "2013-01-01"
+  cmdenv "ENDDATE"   "2013-01-01"
 
-  (Sticky, "-W") =:@ do arg "foo"
-                        arg "bar"
-                        arg "baz"
-                        arg (100 :: Int)
-                        arg ["some", "strange", "things"]
+testIt = runHadoopArgs (Env "s3://aggregatators/scripts/version-3.1" "s3://aggregators/dictionaries/version-1.0") (testArgs True)
 
-testIt = runHadoopArgs (Env "/bin" "/etc") (testArgs True)
+testIt2 = right (second shellize) $ runArgsM (Env "/bin" "/etc") (testArgs True)
 
-testIt' = right (second shellize) $ runArgsM (Env "/bin" "/etc") (testArgs True)
+testIt3 = do
+  system' "./echo-args" (Env "/bin" "/etc")(testArgs True)
+  rawSystem' "./echo-args" (Env "/bin" "/etc") (testArgs True)

@@ -1,5 +1,5 @@
 {-# LANGUAGE ViewPatterns, OverlappingInstances, FlexibleContexts
-  , FlexibleInstances, GeneralizedNewtypeDeriving #-}
+  , FlexibleInstances, GeneralizedNewtypeDeriving, DefaultSignatures #-}
 
 module System.Console.ArgBuilder
     (
@@ -23,8 +23,14 @@ module System.Console.ArgBuilder
     -- * Converting utils
     , detokenize
     , shellize
+    -- * Improved process running functions
+    , rawSystem'
+    , system'
     )
     where
+
+import System.Process (rawSystem, system)
+import System.Exit (ExitCode)
 
 import Control.Monad.Reader
 import Control.Monad.State
@@ -81,12 +87,13 @@ detokenize = concatMap expandArgument
 -- 'System.Process.system' or used in shell. Output string is escaped,
 -- so no iterpolation is being made.
 shellize = intercalate " " . map escape . detokenize
+
+escape s | any (not . isNonEscapable) s = "'" ++ concatMap escSingleQuote s ++ "'"
+         | otherwise = s
     where
-      escape s | any (not . isNonEscapable) s = "'" ++ concatMap escSingleQuote s ++ "'"
-               | otherwise = s
       escSingleQuote '\'' = "'\\''"
       escSingleQuote x = x:[]
-      isNonEscapable c = any ($ c) [isAlphaNum, (`elem` "-_+=/:")]
+      isNonEscapable c = any ($ c) [isAlphaNum, (`elem` ".,-_+=/:")]
 
 -- | Shortcut type for argmument builder monad (high-level).
 type ArgsM env s a = ArgBuilderM env s Argument a
@@ -124,20 +131,19 @@ instance ArgWrite Argument where
 -- | Class of types which can be printed as a command line argument.
 class ArgLike a where
     printArg :: a -> Arg
+    default printArg :: (Show a) => a -> Arg
+    printArg = Arg . show
 
 instance ArgLike String where
     printArg = Arg
 
-instance ArgLike Int where
-    printArg = Arg . show
-
-instance ArgLike Integer where
-    printArg = Arg . show
+instance ArgLike Int
+instance ArgLike Integer
 
 instance (ArgLike a, ArgLike b) => ArgLike (a, b) where
     printArg ( printArg -> Arg a
              , printArg -> Arg b
-             ) = Arg $ a ++ "," ++ b
+             ) = Arg $ a ++ "=" ++ b
 
 instance (ArgLike a, ArgLike b, ArgLike c) => ArgLike (a, b, c) where
     printArg ( printArg -> Arg a
@@ -213,3 +219,13 @@ infix 1 =:$
   ((r, _), args) <- liftError $ runArgBuilderM env st argm
   f =:: shellize args
   return r
+
+
+rawSystem' :: (Default s) => String -> env -> ArgsM env s () -> IO ExitCode
+rawSystem' exe env m =
+    rawSystem exe . either error (detokenize . snd) . runArgsM env $ m
+
+system'    :: (Default s) => [Char] -> env -> ArgBuilderM env s Argument a -> IO ExitCode
+system' exe env m =
+    let args = either error (shellize . snd) . runArgsM env $ m
+    in system $ exe ++ " " ++ args

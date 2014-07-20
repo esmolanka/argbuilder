@@ -70,6 +70,7 @@ data Argument = Argument Arg
                 deriving (Eq, Show)
 
 -- | Flatten tokens to a list of arguments, which could be passed to 'System.Process.runProcess'.
+detokenize :: [Argument] -> [String]
 detokenize = concatMap expandArgument
     where
       joinFlagArg :: FlagType -> String -> String -> [String]
@@ -86,8 +87,10 @@ detokenize = concatMap expandArgument
 -- | Flatten tokens to a string, which could be passed to
 -- 'System.Process.system' or used in shell. Output string is escaped,
 -- so no iterpolation is being made.
+shellize :: [Argument] -> String
 shellize = intercalate " " . map escape . detokenize
 
+escape :: String -> String
 escape s | any (not . isNonEscapable) s = "'" ++ concatMap escSingleQuote s ++ "'"
          | otherwise = s
     where
@@ -173,7 +176,7 @@ instance Flag String where
     (=::) f arg  = (Separated, f) =:: arg
 
 instance Flag (FlagType, String) where
-    flag (ty, f)       = tell [ Flag f ]
+    flag (_ty, f)      = tell [ Flag f ]
     (=:?) (ty, f) marg = tell [ Optional ty f (fmap Arg marg) ]
     (=::) (ty, f) arg  = tell [ Parameter ty f (Arg arg) ]
 
@@ -220,12 +223,14 @@ infix 1 =:$
   f =:: shellize args
   return r
 
-
+-- | Run a process with built agruments
 rawSystem' :: (Default s) => String -> env -> ArgsM env s () -> IO ExitCode
 rawSystem' exe env m =
-    rawSystem exe . either error (detokenize . snd) . runArgsM env $ m
+    let args = either error (detokenize . snd) . runArgsM env $ m
+    in rawSystem exe args
 
-system'    :: (Default s) => [Char] -> env -> ArgBuilderM env s Argument a -> IO ExitCode
+-- | Run a process with ArgBuilder constructed arguments, using @system@
+system' :: (Default s) => [Char] -> env -> ArgsM env s () -> IO ExitCode
 system' exe env m =
     let args = either error (shellize . snd) . runArgsM env $ m
-    in system $ exe ++ " " ++ args
+    in system (exe ++ " " ++ args)
